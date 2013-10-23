@@ -66,7 +66,8 @@ int main(int argc, char **argv) {
     
 
 	// Initialize the liblo server, which permits system message passing over the OSC protocol
-    if (USE_LO == 1)
+	/*    
+	if (USE_LO == 1)
     {
 		// Start a new server on port 7770
         lo_server_thread st = lo_server_thread_new("7770", error);
@@ -87,6 +88,7 @@ int main(int argc, char **argv) {
         lo_server_thread_start(st);
         lo_fd = lo_server_get_socket_fd(st);
     }
+	*/
 	
     // Initialize video capture, make sure it opens correctly
 	cv::VideoCapture capture(CV_CAP_OPENNI);
