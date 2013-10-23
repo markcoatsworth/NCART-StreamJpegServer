@@ -1,0 +1,331 @@
+#include <stdio.h>
+#include <iostream>
+#include <unistd.h>
+#include <fstream>
+#include <iostream>
+#include <stdlib.h>
+#include <sstream>
+#include <sys/time.h>
+#include <sys/types.h>
+
+//Socket includes
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+//PThread include
+#include <pthread.h>
+
+//OpenCV2.2 includes
+#include <opencv/cv.h>
+#include <opencv/highgui.h>
+//#include <libfreenect_cv.h>
+
+//Jpeg Lib includes
+#include <jpeglib.h>
+
+//Local includes
+#include "process_jpeg.h"
+#include "globals.h"
+#include "osc_handlers.h"
+
+//Liblo includes
+//#include <lo/lo.h>
+
+#define DEBUG 0         //1 to print debug msgs, 0 to print nothing
+#define PORT 8888
+#define USE_LO 0
+
+using namespace std;
+
+
+// *****************************************************************************
+// READ ME!!!!!
+
+//global vars - make sure if you edit anything here you edit the globals.h file!
+//and if need be, the globals.cpp file
+CvCapture* capture;
+IplImage *compressed_img = NULL;
+int is_data_ready = 0;
+int serversock;
+int clientsock;
+char* cstr2;
+int fileLength;
+char charFileLength[10];
+IplImage *image = NULL;
+IplImage *depthImage = NULL;
+IplImage *depthImageCopy = NULL;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+
+void* streamServer(void* arg);
+void quit(char* msg, int retval);
+
+
+int main(int argc, char **argv) 
+{
+	// Initialize variables    	
+	pthread_t thread_s;
+    	char key = '0';
+    	fd_set rfds;
+    	struct timeval tv;
+    	int retval;
+    	int lo_fd;
+
+	// Setup a liblo server thread. Not sure what exactly this is used for?
+	if (USE_LO == 1)
+	{
+		// start a new server on port 7770
+		lo_server_thread st = lo_server_thread_new("7770", error);
+
+		// add method that will match any path and args
+		lo_server_thread_add_method(st, NULL, NULL, generic_handler, NULL);
+
+		// add method that will match the path /foo/bar, with two numbers, coerced
+		// to float and int
+		lo_server_thread_add_method(st, "/foo/bar", "fi", foo_handler, NULL);
+
+		// add method that will match the path /quit with no args
+		lo_server_thread_add_method(st, "/quit", "", quit_handler, NULL);
+
+		lo_server_thread_add_method(st, "/capture", "s", capture_handler, NULL);
+
+		lo_server_thread_start(st);
+
+		lo_fd = lo_server_get_socket_fd(st);
+	}
+
+	// Create a window
+	cvNamedWindow("stream_server", CV_WINDOW_AUTOSIZE);
+
+	// Start capturing data from the depth camera
+	int DeviceNum = CV_CAP_OPENNI;
+/*	
+	cv::VideoCapture newcapture(DeviceNum);
+	if(newcapture.isOpened() == true)
+	{
+		printf("video capturing has been initialized, device=%d\n", DeviceNum);
+	}
+	else
+	{
+		printf("video capturing not initialized, device=%d\n", DeviceNum);
+	}
+*/	
+
+	// Allocate an image, and capture data from the camera
+		
+	image = cvCreateImage(cvSize(640,480),IPL_DEPTH_8U, 3);
+	CvCapture *capture;
+	//capture = cvCreateCameraCapture(DeviceNum); 	//if using a webcam, not the kinect
+	capture = cvCaptureFromCAM(DeviceNum);	
+
+	//make sure the capture doesn't return null
+	if (!capture) 
+	{
+		fprintf(stderr, "Cannot initialize device %d!\n", DeviceNum);
+		return 1;
+	}
+
+	image = cvQueryFrame(capture);
+
+
+	if (!image) 
+	{
+		printf("Error: Device %d not connected?\n", DeviceNum);
+		return -1;
+	}
+	
+
+	// run the streaming server as a separate thread
+	if (pthread_create(&thread_s, NULL, streamServer, NULL)) 
+	{
+		quit("pthread_create failed.", 1);
+	}
+
+   	//printf("created new pthread\n");
+    	//cvCvtColor(image, image, CV_RGB2BGR);
+
+    	//cvSaveImage("edge.jpg", image, 0);
+
+
+    	//printf("%d\n", DEPTH_IMG_SIZE);
+
+	// Start the main loop, capturing image data and storing in memory
+    	while (1) 
+	{
+		
+        	image = cvQueryFrame(capture);
+
+        	if (!image) 
+		{
+            	printf("Error: Device not connected? - rgb failed\n");
+            	return -1;
+        	}
+
+		pthread_mutex_lock(&mutex);
+		//cvCvtColor(image, image, CV_RGB2BGR);
+		writeJpeg(stringstrm, image);
+
+		//compressed_img = readJpeg(stringstrm);    //this is how to read a jpeg from a memory stream
+
+		//cvSaveImage("compressed_img.jpg", compressed_img, 0);
+
+		if (capture_dev == 1) {
+			compressed_img = readJpeg(stringstrm);    //this is how to read a jpeg from a memory stream
+			cvSaveImage("compressed_img.jpg", compressed_img, 0);
+			capture_dev = 0;
+		}
+
+		is_data_ready = 1;
+		pthread_mutex_unlock(&mutex);
+
+
+		cvShowImage("stream_server", image);
+		
+		key = cvWaitKey(2);
+		if (key == 27) break;
+
+	}
+
+	// user has pressed 'q', terminate the streaming server
+	if (pthread_cancel(thread_s)) 
+	{
+		quit("pthread_cancel failed.", 1);
+	}
+
+	//free memory
+	/*	
+	if (capture) cvReleaseCapture(&capture);
+	*/
+
+	cvDestroyWindow("stream_server");
+	quit(NULL, 0);
+}
+
+
+/**
+ * This is the streaming server, run as a separate thread
+ * This function waits for a client to connect, and sends the compressed jpeg images
+ * These images are contained in memory
+ */
+void* streamServer(void* arg) 
+{
+    	struct sockaddr_in server;
+
+	// make this thread cancellable using pthread_cancel()
+	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+
+	/* open socket */
+	if ((serversock = socket(PF_INET, SOCK_STREAM, 0)) == -1) 
+	{
+		quit("socket() failed", 1);
+	}
+
+	// setup server's IP and port
+	memset(&server, 0, sizeof(server));
+	server.sin_family = AF_INET;
+	server.sin_port = htons(PORT);
+	server.sin_addr.s_addr = INADDR_ANY;
+
+	// bind the socket
+	if (bind(serversock, (const sockaddr*)&server, sizeof(server)) == -1) 
+	{
+		quit("bind() failed", 1);
+	} 
+	else 
+	{
+		printf("bind successful\n");
+	}
+
+
+	// wait for connection
+	if (listen(serversock, 10) == -1) 
+	{
+		quit("listen() failed.", 1);
+	} 
+	else 
+	{
+		printf("listen successful\n");
+	}
+
+	// accept a client
+	if ((clientsock = accept(serversock, NULL, NULL)) == -1) 
+	{
+		quit("accept() failed", 1);
+	} 
+	else 
+	{
+   		printf("accept successful\n");
+	}
+
+	int bytes;
+	int size_ss = 0;
+
+	// start sending images
+	while(1) 
+	{
+		// send the compressed jpeg data, thread safe
+		pthread_mutex_lock(&mutex);
+		if (is_data_ready) 
+		{
+            stringstrm.seekg(0, ios::end);
+            size_ss = stringstrm.tellg();
+            //printf("before: %d\n", size_ss);
+            //size_ss += DEPTH_IMG_SIZE;
+            //printf("after: %d\n", size_ss);
+            sprintf(charFileLength, "%i", size_ss);
+            if (DEBUG == 1)
+                printf("%d ----------------- %s\n", size_ss, charFileLength);
+            bytes = send(clientsock, charFileLength, 10, 0);
+            //printf("BYTES: %d\n", bytes);
+            //printf("Sent first\n");
+            bytes = send(clientsock, stringstrm.str().c_str(), size_ss, 0);
+            //printf("BYTES: %d\n", bytes);
+
+            is_data_ready = 0;
+        }
+
+        pthread_mutex_unlock(&mutex);
+        stringstrm.str(""); //clear the stringstream
+
+        // if something went wrong, restart the connection
+        if (bytes != size_ss) {
+            fprintf(stderr, "Connection closed.\n");
+            close(clientsock);
+
+            if ((clientsock = accept(serversock, NULL, NULL)) == -1) {
+                quit("accept() failed", 1);
+            }
+        }
+
+
+        // have we terminated yet?
+        pthread_testcancel();
+
+        // no, take a rest for a while
+        usleep(1000);
+    }
+}
+
+/**
+ * this function provides a way to exit nicely from the system
+ */
+void quit(char* msg, int retval) {
+    if (retval == 0) {
+        fprintf(stdout, (msg == NULL ? "" : msg));
+        fprintf(stdout, "\n");
+    } else {
+        fprintf(stderr, (msg == NULL ? "" : msg));
+        fprintf(stderr, "\n");
+    }
+
+    if (clientsock) close(clientsock);
+    if (serversock) close(serversock);
+    if (capture) cvReleaseCapture(&capture);
+    if (compressed_img) cvReleaseImage(&compressed_img);
+
+    pthread_mutex_destroy(&mutex);
+
+    exit(retval);
+}
