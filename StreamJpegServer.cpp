@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <signal.h>
 #include <sstream>
 #include <stdlib.h>
 #include <stdio.h>
@@ -27,11 +28,11 @@
 #include "osc_handlers.h"
 
 //Liblo includes
-#include <lo/lo.h>
+//#include <lo/lo.h>
 
 #define DEBUG 0         	// 1  to print debug msgs, 0 to print nothing
 #define PORT 8888
-#define USE_LO 1
+#define USE_LO 0
 
 #define OPENNI_BGR_IMAGE 5 	// this is defined somewhere in an OpenGL header, but I can't find it!
 
@@ -51,11 +52,18 @@ int serversock;
 int clientsock;
 int fileLength;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+struct sigaction SignalActionManager;
 
+// Function headers
 
+void SignalHandler(int sigNum);
 void* streamServer(void* arg);
 void quit(char* msg, int retval);
 
+
+/**
+ * Main program
+ */
 
 int main(int argc, char **argv) {
     
@@ -63,6 +71,11 @@ int main(int argc, char **argv) {
 	char key = '0';
 	pthread_t thread_s;
 	int lo_fd;
+
+	// Set up signal handler, which will mainly be used to capture SIGINT and SIGPIPE
+	SignalActionManager.sa_handler = SignalHandler;
+	sigaction(SIGINT, &SignalActionManager, NULL);	
+	sigaction(SIGPIPE, &SignalActionManager, NULL);
     
 
 	// Initialize the liblo server, which permits system message passing over the OSC protocol
@@ -105,12 +118,12 @@ int main(int argc, char **argv) {
     }
 
 	// Set up the live stream_server window	
-	cv::namedWindow("stream_server", CV_WINDOW_AUTOSIZE);
+	//cv::namedWindow("stream_server", CV_WINDOW_AUTOSIZE);
 
 
    	// Main capture + display video loop
 	cv::Mat image(640, 480, CV_8UC3); // initialize the capture matrix
-    for (int i = 0; i < 1000; i ++) 
+    while(1) 
 	{
 		// Capture a frame.	Note this MUST be done via grab() then retrieve(), *NOT* read()
 		capture.grab();	
@@ -127,7 +140,7 @@ int main(int argc, char **argv) {
 		// Convert image to a jpeg in system memory, and display in the stream_server window
 		IplImage* ConvertedIplImage = new IplImage(image);	
 		writeJpeg(stringstrm, ConvertedIplImage);
-		imshow("stream_server", image);
+		//imshow("stream_server", image);
 
 		// Resume the thread
         is_data_ready = 1;
@@ -151,13 +164,34 @@ int main(int argc, char **argv) {
 	{ 	
 		capture.release();
 		image.release();
-		cvDestroyWindow("stream_server");
+		//cvDestroyWindow("stream_server");
 	}
 
     // Graceful exit via quit, which shuts down the streaming server
     quit(NULL, 0);
 }
 
+/**
+ * Signal Handler function is designed to handle two signals:
+ * SIGINT: close all sockets and OpenCV objects and exit gracefully
+ * SIGPIPE: handle network disconnection gracefully and wait to reconnect
+ */
+
+void SignalHandler(int sigNum)
+{
+	if(sigNum == SIGINT)
+	{
+		printf("\nCaught SIGINT, exiting gracefully...\n");
+		quit(NULL, 0);
+	}
+	else if(sigNum == SIGPIPE)
+	{
+		// Do nothing. The thread will detect the dropped connection, and wait for reconnection.
+		// However default Unix SIGPIPE handling shuts down the process entirely, so this fake
+		// handler prevents that.
+		printf("Caught SIGPIPE...\n");
+	}
+}
 
 /**
  * This is the streaming server, run as a separate thread
@@ -187,33 +221,32 @@ void* streamServer(void* arg)
     // Bind the socket
     if (bind(serversock, (const sockaddr*)&server, sizeof(server)) == -1) 
 	{
-        quit("bind() failed", 1);
+        quit("Could not bind socket", 1);
     } 
 	else 
 	{
-        printf("bind successful\n");
+        printf("Socket successfully bound\n");
     }
 
 
     // Wait for connection
     if (listen(serversock, 10) == -1) 
 	{
-        quit("listen() failed.", 1);
+        quit("Could not listen for clients on socket", 1);
     } 
 	else 
 	{
-        printf("listen successful\n");
+        printf("Waiting for clients...\n");
     }
-
 
     // Accept a client
     if ((clientsock = accept(serversock, NULL, NULL)) == -1) 
 	{
-        quit("accept() failed", 1);
+        quit("Client connection failed", 1);
     } 
 	else 
 	{
-        printf("accept successful\n");
+        printf("Client connected successfully!\n");
     }
 
     int bytes;
@@ -224,34 +257,36 @@ void* streamServer(void* arg)
 	{
         // send the compressed jpeg data, thread safe
         pthread_mutex_lock(&mutex);
+
         if (is_data_ready) 
 		{
+			//printf("Sending data...\n");
             stringstrm.seekg(0, ios::end);
             size_ss = stringstrm.tellg();
             //printf("before: %d\n", size_ss);
             //size_ss += DEPTH_IMG_SIZE;
             //printf("after: %d\n", size_ss);
             sprintf(charFileLength, "%i", size_ss);
-            if (DEBUG == 1)
+            
+			if (DEBUG == 1)
 			{
                 printf("%d ----------------- %s\n", size_ss, charFileLength);
 			}
-            bytes = send(clientsock, charFileLength, 10, 0);
-            //printf("BYTES: %d\n", bytes);
-            //printf("Sent first\n");
+            
+			bytes = send(clientsock, charFileLength, 10, 0);
             bytes = send(clientsock, stringstrm.str().c_str(), size_ss, 0);
-            //printf("BYTES: %d\n", bytes);
-
             is_data_ready = 0;
         }
-
+		//printf("Unlocking thread and clearing string stream...\n");
         pthread_mutex_unlock(&mutex);
         stringstrm.str(""); //clear the stringstream
-
+		//printf("Checking if something went wrong...\n");
         // if something went wrong, restart the connection
-        if (bytes != size_ss) 
+			
+		if (bytes != size_ss) 
 		{
-            fprintf(stderr, "Connection closed.\n");
+			//printf("Something went wrong!\n");
+            fprintf(stderr, "Connection closed, waiting for reconnect...\n");
             close(clientsock);
 
             if ((clientsock = accept(serversock, NULL, NULL)) == -1) 
