@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <fstream>
 #include <iostream>
 #include <signal.h>
@@ -207,7 +208,8 @@ void* streamServer(void* arg)
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     // Open socket
-    if ((serversock = socket(PF_INET, SOCK_STREAM, 0)) == -1) 
+    //if ((serversock = socket(PF_INET, SOCK_STREAM, 0)) == -1) // TCP socket
+	if ((serversock = socket(PF_INET, SOCK_DGRAM, 0)) == -1) // UDP socket
 	{
         quit("socket() failed", 1);
     }
@@ -221,7 +223,7 @@ void* streamServer(void* arg)
     // Bind the socket
     if (bind(serversock, (const sockaddr*)&server, sizeof(server)) == -1) 
 	{
-        quit("Could not bind socket", 1);
+		quit("Could not bind socket", 1);
     } 
 	else 
 	{
@@ -232,6 +234,7 @@ void* streamServer(void* arg)
     // Wait for connection
     if (listen(serversock, 10) == -1) 
 	{
+		printf("Failed, errno=%d\n", errno);
         quit("Could not listen for clients on socket", 1);
     } 
 	else 
