@@ -8,7 +8,8 @@
 
 #define DIV 1
 
-extern std::stringstream stringstrm; //(stringstream::in | stringstream::out);
+extern std::stringstream DepthStringStream; //(stringstream::in | stringstream::out);
+extern std::stringstream ImageStringStream; //(stringstream::in | stringstream::out);
 extern int serversock, clientsock;
 extern pthread_mutex_t mutex;
 extern int is_data_ready;

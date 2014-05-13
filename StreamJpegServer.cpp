@@ -31,11 +31,12 @@
 //Liblo includes
 //#include <lo/lo.h>
 
-#define DEBUG 0         	// 1  to print debug msgs, 0 to print nothing
+#define DEBUG 1         	// 1  to print debug msgs, 0 to print nothing
 #define PORT 8888
 #define USE_LO 0
 
-#define OPENNI_BGR_IMAGE 5 	// this is defined somewhere in an OpenGL header, but I can't find it!
+#define OPENNI_DEPTH_MAP 0 	// this is defined somewhere in an OpenGL header, but I can't find it!
+#define OPENNI_BGR_IMAGE 5
 
 using namespace std;
 
@@ -44,14 +45,23 @@ using namespace std;
 // READ ME!!!!!
 
 // Global vars: if you edit anything here, also edit globals.h and (if need be) globals.cpp
-cv::VideoCapture capture;
+cv::VideoCapture captureDepth;
+cv::VideoCapture captureVideo;
+cv::Mat depth;
 cv::Mat image;
+
+std::stringstream DepthStringStream;
+std::stringstream ImageStringStream;
+
 char* cstr2;
-char charFileLength[10];
+char DepthFileLengthString[10];
+char ImageFileLengthString[10];
 int is_data_ready = 0;
 int serversock;
 int clientsock;
-int fileLength;
+int DepthDataLength;
+int ImageDataLength;
+
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 struct sigaction SignalActionManager;
 
@@ -59,6 +69,7 @@ struct sigaction SignalActionManager;
 
 void SignalHandler(int sigNum);
 void* streamServer(void* arg);
+void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth);
 void quit(char* msg, int retval);
 
 
@@ -105,43 +116,66 @@ int main(int argc, char **argv) {
 	*/
 	
     // Initialize video capture, make sure it opens correctly
-	cv::VideoCapture capture(CV_CAP_OPENNI);
-	if (!capture.isOpened()) 
+	cv::VideoCapture captureVideo(CV_CAP_OPENNI);
+	if (!captureVideo.isOpened()) 
 	{
-	    fprintf(stderr, "Cannot initialize webcam!\n");
+	    fprintf(stderr, "Error initializing video capture! Make sure your webcam is connected.\n");
 		return 1;
 	}
-
+	
+	// Initialize depth capture, make sure it opens correctly
+	cv::VideoCapture captureDepth(CV_CAP_OPENNI_DEPTH_MAP);
+	if (!captureDepth.isOpened()) 
+	{
+	    fprintf(stderr, "Error initializing depth capture! Make sure your webcam is connected.\n");
+		return 1;
+	}
+	
     // Run the streaming server as a separate thread
     if (pthread_create(&thread_s, NULL, streamServer, NULL)) 
 	{
 		quit("pthread_create failed.", 1);
     }
 
-	// Set up the live stream_server window	
-	//cv::namedWindow("stream_server", CV_WINDOW_AUTOSIZE);
-
-
-   	// Main capture + display video loop
-	cv::Mat image(640, 480, CV_8UC3); // initialize the capture matrix
-    while(1) 
+	// Initialize OpenCV Matrix objects
+	// Reference: http://docs.opencv.org/2.4.6/doc/user_guide/ug_highgui.html
+	cv::Mat image(640, 480, CV_8UC3); // initialize the RGB capture matrix
+	cv::Mat depth(640, 480, CV_16UC1); // initialize the depth capture matrix
+    
+	// Main capture + display video loop
+	while(1) 
 	{
-		// Capture a frame.	Note this MUST be done via grab() then retrieve(), *NOT* read()
-		capture.grab();	
-		capture.retrieve(image, OPENNI_BGR_IMAGE);
+		// Capture an RGB frame. Note this MUST be done via grab() then retrieve(), *NOT* read()
+		captureVideo.grab();	
+		captureVideo.retrieve(image, OPENNI_BGR_IMAGE);
 		if (image.empty()) 
 		{
 			printf("Error: Device not connected? - RGB capture failed\n");
 			return -1;
 		}
 
+		// Now capture a depth frame
+		captureDepth.grab();
+		captureDepth.retrieve(depth, OPENNI_DEPTH_MAP);
+		if (depth.empty()) 
+		{
+			printf("Error: Device not connected? - Depth capture failed\n");
+			return -1;
+		}
+		
 		// Lock the thread       	
 		pthread_mutex_lock(&mutex);
        			        
-		// Convert image to a jpeg in system memory, and display in the stream_server window
-		IplImage* ConvertedIplImage = new IplImage(image);	
-		writeJpeg(stringstrm, ConvertedIplImage);
-		//imshow("stream_server", image);
+		// Clear the image and depth string streams
+		ImageStringStream.str("");
+		DepthStringStream.str("");
+
+		// Convert image to a jpeg in system memory
+		IplImage* ConvertedIplImage = new IplImage(image);
+		writeJpeg(ImageStringStream, ConvertedIplImage);
+
+		// Now append the depth frame to the jpeg in memory
+		WriteDepthData(DepthStringStream, depth);
 
 		// Resume the thread
         is_data_ready = 1;
@@ -161,11 +195,16 @@ int main(int argc, char **argv) {
     }
 
     // Free memory + close window
-    if(capture.isOpened())
+    if(captureVideo.isOpened())
 	{ 	
-		capture.release();
+		captureVideo.release();
 		image.release();
 		//cvDestroyWindow("stream_server");
+	}
+	if(captureDepth.isOpened())
+	{ 	
+		captureDepth.release();
+		depth.release();
 	}
 
     // Graceful exit via quit, which shuts down the streaming server
@@ -190,7 +229,11 @@ void SignalHandler(int sigNum)
 		// Do nothing. The thread will detect the dropped connection, and wait for reconnection.
 		// However default Unix SIGPIPE handling shuts down the process entirely, so this fake
 		// handler prevents that.
-		printf("Caught SIGPIPE...\n");
+		//printf("Caught SIGPIPE...\n");
+
+		// For now our dropped connection detection is gone, so just kill the program on SIGPIPE
+		printf("\nCaught SIGPIPE, exiting gracefully...\n");
+		quit(NULL, 0);
 	}
 }
 
@@ -208,8 +251,7 @@ void* streamServer(void* arg)
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     // Open socket
-    //if ((serversock = socket(PF_INET, SOCK_STREAM, 0)) == -1) // TCP socket
-	if ((serversock = socket(PF_INET, SOCK_DGRAM, 0)) == -1) // UDP socket
+    if ((serversock = socket(PF_INET, SOCK_STREAM, 0)) == -1) // TCP socket
 	{
         quit("socket() failed", 1);
     }
@@ -253,7 +295,8 @@ void* streamServer(void* arg)
     }
 
     int bytes;
-    int size_ss = 0;
+	int DepthStreamSize = 0;
+    int ImageStreamSize = 0;
 
     // Start sending images
     while(1) 
@@ -264,29 +307,40 @@ void* streamServer(void* arg)
         if (is_data_ready) 
 		{
 			//printf("Sending data...\n");
-            stringstrm.seekg(0, ios::end);
-            size_ss = stringstrm.tellg();
-            //printf("before: %d\n", size_ss);
-            //size_ss += DEPTH_IMG_SIZE;
-            //printf("after: %d\n", size_ss);
-            sprintf(charFileLength, "%i", size_ss);
+			
+			// Set up image data for socket connections
+			ImageStringStream.seekg(0, ios::end);
+            ImageStreamSize = ImageStringStream.tellg();
+            sprintf(ImageFileLengthString, "%i", ImageStreamSize);
+			//printf("ImageFileLengthString: %s\n", ImageFileLengthString);            
+			//printf("Position in input stream: %d\n--\n", ImageStreamSize);
+
+			// Set up depth data for socket connections
+			DepthStringStream.seekg(0, ios::end);
+            DepthStreamSize = DepthStringStream.tellg();
+            sprintf(DepthFileLengthString, "%i", DepthStreamSize);
+			//printf("DepthFileLengthString: %s\n", DepthFileLengthString);            
+			//printf("Position in input stream: %d\n--\n", DepthStreamSize);
             
 			if (DEBUG == 1)
 			{
-                printf("%d ----------------- %s\n", size_ss, charFileLength);
+                cout << "Sending image data (size " << ImageStreamSize << " bytes), depth data (" << DepthStreamSize << " bytes)" << endl;	
 			}
             
-			bytes = send(clientsock, charFileLength, 10, 0);
-            bytes = send(clientsock, stringstrm.str().c_str(), size_ss, 0);
+			bytes = send(clientsock, ImageFileLengthString, 10, 0);
+            bytes = send(clientsock, ImageStringStream.str().c_str(), ImageStreamSize, 0);
+			bytes = send(clientsock, DepthFileLengthString, 10, 0);
+            bytes = send(clientsock, DepthStringStream.str().c_str(), DepthStreamSize, 0);
             is_data_ready = 0;
         }
 		//printf("Unlocking thread and clearing string stream...\n");
         pthread_mutex_unlock(&mutex);
-        stringstrm.str(""); //clear the stringstream
+
 		//printf("Checking if something went wrong...\n");
         // if something went wrong, restart the connection
-			
-		if (bytes != size_ss) 
+		
+		/* This error check doesn't work anymore, fix it
+		if (bytes != ImageStreamSize) 
 		{
 			//printf("Something went wrong!\n");
             fprintf(stderr, "Connection closed, waiting for reconnect...\n");
@@ -297,7 +351,7 @@ void* streamServer(void* arg)
                 quit("accept() failed", 1);
             }
         }
-
+		*/
 
         // have we terminated yet?
         pthread_testcancel();
@@ -308,7 +362,31 @@ void* streamServer(void* arg)
 }
 
 /**
- * this function provides a way to exit nicely from the system
+ * Compress the depth data and add it to the output stream
+ */
+
+void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth) 
+{
+	// Clear the output stream
+	//_outstream.str("");
+
+	// Visit each node in the depth matrix and write values to the stringstream
+	/*	
+	for (int row = 0; row < _depth.rows; row ++)
+	{
+		for (int col = 0; col < _depth.cols; col ++)
+		{
+			//cout << "[" << row << "," << col << "]" << _depth.at<int>(row, col);
+			_outstream << _depth.at<int>(row, col);
+		}
+	}
+	*/
+	_outstream << "depth data yall!" << endl;
+	
+}
+
+/**
+ * Quit function provides a way to exit nicely from the system
  */
 void quit(char* msg, int retval) 
 {
@@ -325,10 +403,16 @@ void quit(char* msg, int retval)
 
     if (clientsock) close(clientsock);
     if (serversock) close(serversock);
-    if(capture.isOpened())
+    
+	if(captureVideo.isOpened())
 	{ 	
-		capture.release();
+		captureVideo.release();
 		image.release();
+	}
+	if(captureDepth.isOpened())
+	{
+		captureDepth.release();
+		depth.release();
 	}
 
     pthread_mutex_destroy(&mutex);
