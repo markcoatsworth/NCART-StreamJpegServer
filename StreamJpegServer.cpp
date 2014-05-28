@@ -23,6 +23,9 @@
 // Jpeg Lib includes
 #include <jpeglib.h>
 
+// ZLib include
+#include <zlib.h>
+
 // Local includes
 #include "process_jpeg.h"
 #include "globals.h"
@@ -71,6 +74,7 @@ void SignalHandler(int sigNum);
 void* streamServer(void* arg);
 void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth);
 void quit(char* msg, int retval);
+cv::Mat visualizeDepth(cv::Mat DepthFrame);
 
 
 /**
@@ -115,23 +119,15 @@ int main(int argc, char **argv) {
     }
 	*/
 	
-    // Initialize video capture, make sure it opens correctly
-	cv::VideoCapture captureVideo(CV_CAP_OPENNI);
+    // Initialize OpenCV video capture, make sure it opens correctly
+	cv::VideoCapture captureVideo(CV_CAP_OPENNI_ASUS);
 	if (!captureVideo.isOpened()) 
 	{
 	    fprintf(stderr, "Error initializing video capture! Make sure your webcam is connected.\n");
 		return 1;
 	}
-	
-	// Initialize depth capture, make sure it opens correctly
-	cv::VideoCapture captureDepth(CV_CAP_OPENNI_DEPTH_MAP);
-	if (!captureDepth.isOpened()) 
-	{
-	    fprintf(stderr, "Error initializing depth capture! Make sure your webcam is connected.\n");
-		return 1;
-	}
-	
-    // Run the streaming server as a separate thread
+
+	    // Run the streaming server as a separate thread
     if (pthread_create(&thread_s, NULL, streamServer, NULL)) 
 	{
 		quit("pthread_create failed.", 1);
@@ -141,7 +137,10 @@ int main(int argc, char **argv) {
 	// Reference: http://docs.opencv.org/2.4.6/doc/user_guide/ug_highgui.html
 	cv::Mat image(640, 480, CV_8UC3); // initialize the RGB capture matrix
 	cv::Mat depth(640, 480, CV_16UC1); // initialize the depth capture matrix
+
+	// cv::namedWindow("stream_server");
     
+	// Debug: show stream server video window
 	// Main capture + display video loop
 	while(1) 
 	{
@@ -154,9 +153,23 @@ int main(int argc, char **argv) {
 			return -1;
 		}
 
-		// Now capture a depth frame
-		captureDepth.grab();
-		captureDepth.retrieve(depth, OPENNI_DEPTH_MAP);
+		// Capture a depth frame
+		/*** Attempt 1 ***/		
+		//captureVideo.grab();
+		//captureVideo.retrieve(depth, OPENNI_DEPTH_MAP);
+		/*** End Attempt 1 ***/
+		/*** Attempt 2 ***/
+		captureVideo.retrieve(depth, CV_CAP_OPENNI_DEPTH_MAP);
+		
+		/*** End Attempt 2 ***/
+
+		
+
+		cv::Mat DepthRGBFrame = visualizeDepth(depth);
+
+		// Debug: convert the depth frame to RGB and display in the server window		
+		//imshow("stream_server", DepthRGBFrame);
+
 		if (depth.empty()) 
 		{
 			printf("Error: Device not connected? - Depth capture failed\n");
@@ -329,8 +342,10 @@ void* streamServer(void* arg)
             
 			bytes = send(clientsock, ImageFileLengthString, 10, 0);
             bytes = send(clientsock, ImageStringStream.str().c_str(), ImageStreamSize, 0);
+			cout << "Sent " << bytes << " bytes of image data." << endl;
 			bytes = send(clientsock, DepthFileLengthString, 10, 0);
             bytes = send(clientsock, DepthStringStream.str().c_str(), DepthStreamSize, 0);
+			cout << "Sent " << bytes << " bytes of depth data." << endl;
             is_data_ready = 0;
         }
 		//printf("Unlocking thread and clearing string stream...\n");
@@ -363,30 +378,143 @@ void* streamServer(void* arg)
 
 /**
  * Compress the depth data and add it to the output stream
+ * zLib usage example: http://bobobobo.wordpress.com/2008/02/23/how-to-use-zlib/
  */
 
 void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth) 
 {
-	// Clear the output stream
-	//_outstream.str("");
+	int SizeDataOriginal = 640*480*2;
+	ulong SizeDataCompressed  = (SizeDataOriginal * 1.1) + 12;
+	unsigned char* DataCompressed = (unsigned char*)malloc(SizeDataCompressed);
 
-	// Visit each node in the depth matrix and write values to the stringstream
-	/*	
+	int z_result = compress(
+        
+        DataCompressed,         // destination buffer,
+                                // must be at least
+                                // (1.01X + 12) bytes as large
+                                // as source.. we made it 1.1X + 12bytes
+
+        &SizeDataCompressed,    // pointer to var containing
+                                // the current size of the
+                                // destination buffer.
+                                // WHEN this function completes,
+                                // this var will be updated to
+                                // contain the NEW size of the
+                                // compressed data in bytes.
+
+        _depth.datastart,           // source data for compression
+        
+        SizeDataOriginal ) ;
+
+	switch( z_result )
+    {
+		case Z_OK:
+			printf("***** SUCCESS! ***** Compressed size is %d bytes\n", SizeDataCompressed );
+		    break;
+
+		case Z_MEM_ERROR:
+		    printf("out of memory\n");
+		    exit(1);    // quit.
+		    break;
+
+		case Z_BUF_ERROR:
+		    printf("output buffer wasn't large enough!\n");
+		    exit(1);    // quit.
+		    break;
+    }
+
+	// Write the compressed data to the output stream
+	for(int i = 0; i < SizeDataCompressed; i++)
+	{
+		_outstream << (char)DataCompressed[i];
+	}
+
+	/*
+	// Visit each node in the depth matrix and write values to the stringstream	
 	for (int row = 0; row < _depth.rows; row ++)
 	{
 		for (int col = 0; col < _depth.cols; col ++)
 		{
-			//cout << "[" << row << "," << col << "]" << _depth.at<int>(row, col);
-			_outstream << _depth.at<int>(row, col);
+			unsigned short DepthValue = _depth.at<short>(row, col);
+			unsigned short MajorDepthValue = DepthValue / 256;
+			unsigned short MinorDepthValue = DepthValue % 256;
+			//cout << "[" << row << "," << col << "]=" << _depth.at<short>(row, col) << ", Encoded=" << MajorDepthValue << MinorDepthValue << endl;
+			_outstream << (char)MajorDepthValue << (char)MinorDepthValue;
+			
 		}
 	}
 	*/
-	_outstream << "depth data yall!" << endl;
-	
 }
 
+/* 
+ * Visualize depth data in RGB spectrum
+ * Inputs: 
+ * - xyzList = 3 * n where n=WIDTH*HEIGHT (x1, y1, z1,..., xn, yn, zn)
+ * Outputs:
+ * - reference to cv matrix 8-bit 3 channels
+ */
+cv::Mat visualizeDepth(cv::Mat DepthFrame) {
+    cv::Mat depthRGB(480, 640, CV_8UC3);
+    int lb, ub;
+	unsigned short MajorDepthValue, MinorDepthValue;
+	int DepthValue;
+    
+	//cout << "DepthFrame.size()=" << DepthFrame.size() << endl;
+  
+    for (int i = 0; i < 480*640; i++) {
+		
+		MajorDepthValue = DepthFrame.datastart[(i*2)+1];		
+		MinorDepthValue = DepthFrame.datastart[i*2];
+		
+		DepthValue = (MajorDepthValue*256) + MinorDepthValue;
+        lb = DepthValue/5 % 256;
+        ub = DepthValue/5 / 256;
+		
+		//cout << "i=" << i << "DepthValue=" << DepthValue << ", ub=" << ub << endl;
+
+        switch (ub) {
+            case 0:
+                depthRGB.datastart[3*i+2] = 255;
+                depthRGB.datastart[3*i+1] = 255-lb;
+                depthRGB.datastart[3*i+0] = 255-lb;
+            break;
+            case 1:
+                depthRGB.datastart[3*i+2] = 255;
+                depthRGB.datastart[3*i+1] = lb;
+                depthRGB.datastart[3*i+0] = 0;
+            break;
+            case 2:
+                depthRGB.datastart[3*i+2] = 255-lb;
+                depthRGB.datastart[3*i+1] = 255;
+                depthRGB.datastart[3*i+0] = 0;
+            break;
+            case 3:
+                depthRGB.datastart[3*i+2] = 0;
+                depthRGB.datastart[3*i+1] = 255;
+                depthRGB.datastart[3*i+0] = lb;
+            break;
+            case 4:
+                depthRGB.datastart[3*i+2] = 0;
+                depthRGB.datastart[3*i+1] = 255-lb;
+                depthRGB.datastart[3*i+0] = 255;
+            break;
+            case 5:
+                depthRGB.datastart[3*i+2] = 0;
+                depthRGB.datastart[3*i+1] = 0;
+                depthRGB.datastart[3*i+0] = 255-lb;
+            break;
+            default:
+                depthRGB.datastart[3*i+2] = 0;
+                depthRGB.datastart[3*i+1] = 0;
+                depthRGB.datastart[3*i+0] = 0;
+            break;
+        }
+    }
+    return depthRGB;
+} 
+
 /**
- * Quit function provides a way to exit nicely from the system
+ * Quit function provides a graceful exit from the system
  */
 void quit(char* msg, int retval) 
 {
