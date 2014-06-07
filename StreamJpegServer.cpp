@@ -1,3 +1,4 @@
+// Standard C++ includes
 #include <errno.h>
 #include <fstream>
 #include <iostream>
@@ -31,12 +32,12 @@
 #include "globals.h"
 #include "osc_handlers.h"
 
-//Liblo includes
-//#include <lo/lo.h>
+// Global constants
 
-#define DEBUG 1         	// 1  to print debug msgs, 0 to print nothing
+#define DEBUG 0         	// 1  to print debug msgs, 0 to print nothing
+#define FRAME_WIDTH 640
+#define FRAME_HEIGHT 480
 #define PORT 8888
-#define USE_LO 0
 
 #define OPENNI_DEPTH_MAP 0 	// this is defined somewhere in an OpenGL header, but I can't find it!
 #define OPENNI_BGR_IMAGE 5
@@ -48,7 +49,7 @@ using namespace std;
 // READ ME!!!!!
 
 // Global vars: if you edit anything here, also edit globals.h and (if need be) globals.cpp
-cv::VideoCapture captureDepth;
+
 cv::VideoCapture captureVideo;
 cv::Mat depth;
 cv::Mat image;
@@ -59,6 +60,7 @@ std::stringstream ImageStringStream;
 char* cstr2;
 char DepthFileLengthString[10];
 char ImageFileLengthString[10];
+
 int is_data_ready = 0;
 int serversock;
 int clientsock;
@@ -93,34 +95,8 @@ int main(int argc, char **argv) {
 	sigaction(SIGINT, &SignalActionManager, NULL);	
 	sigaction(SIGPIPE, &SignalActionManager, NULL);
     
-
-	// Initialize the liblo server, which permits system message passing over the OSC protocol
-	/*    
-	if (USE_LO == 1)
-    {
-		// Start a new server on port 7770
-        lo_server_thread st = lo_server_thread_new("7770", error);
-
-        // Add method that will match any path and args
-        lo_server_thread_add_method(st, NULL, NULL, generic_handler, NULL);
-
-        // Add method that will match the path /foo/bar, with two numbers, coerced to float and int
-        lo_server_thread_add_method(st, "/foo/bar", "fi", foo_handler, NULL);
-
-        // Add method that will match the path /quit with no args
-        lo_server_thread_add_method(st, "/quit", "", quit_handler, NULL);
-
-		// Add method to request captures        
-		lo_server_thread_add_method(st, "/capture", "s", capture_handler, NULL);
-
-		// Start the server
-        lo_server_thread_start(st);
-        lo_fd = lo_server_get_socket_fd(st);
-    }
-	*/
-	
     // Initialize OpenCV video capture, make sure it opens correctly
-	cv::VideoCapture captureVideo(CV_CAP_OPENNI_ASUS);
+	cv::VideoCapture captureVideo(CV_CAP_OPENNI);
 	if (!captureVideo.isOpened()) 
 	{
 	    fprintf(stderr, "Error initializing video capture! Make sure your webcam is connected.\n");
@@ -135,12 +111,15 @@ int main(int argc, char **argv) {
 
 	// Initialize OpenCV Matrix objects
 	// Reference: http://docs.opencv.org/2.4.6/doc/user_guide/ug_highgui.html
-	cv::Mat image(640, 480, CV_8UC3); // initialize the RGB capture matrix
-	cv::Mat depth(640, 480, CV_16UC1); // initialize the depth capture matrix
+	cv::Mat image(FRAME_WIDTH, FRAME_HEIGHT, CV_8UC3); // initialize the RGB capture matrix
+	cv::Mat depth(FRAME_WIDTH, FRAME_HEIGHT, CV_16UC1); // initialize the depth capture matrix
 
-	// cv::namedWindow("stream_server");
-    
 	// Debug: show stream server video window
+	if(DEBUG == 1)
+	{
+		cv::namedWindow("stream_server");
+	}
+
 	// Main capture + display video loop
 	while(1) 
 	{
@@ -154,27 +133,21 @@ int main(int argc, char **argv) {
 		}
 
 		// Capture a depth frame
-		/*** Attempt 1 ***/		
-		//captureVideo.grab();
-		//captureVideo.retrieve(depth, OPENNI_DEPTH_MAP);
-		/*** End Attempt 1 ***/
-		/*** Attempt 2 ***/
 		captureVideo.retrieve(depth, CV_CAP_OPENNI_DEPTH_MAP);
-		
-		/*** End Attempt 2 ***/
-
-		
-
-		cv::Mat DepthRGBFrame = visualizeDepth(depth);
-
-		// Debug: convert the depth frame to RGB and display in the server window		
-		//imshow("stream_server", DepthRGBFrame);
-
 		if (depth.empty()) 
 		{
 			printf("Error: Device not connected? - Depth capture failed\n");
 			return -1;
 		}
+		
+		// Debug: convert the depth frame to RGB and display in the server window		
+		if(DEBUG == 1)
+		{
+			cv::Mat DepthRGBFrame = visualizeDepth(depth);		
+			imshow("stream_server", DepthRGBFrame);
+		}
+
+		
 		
 		// Lock the thread       	
 		pthread_mutex_lock(&mutex);
@@ -212,12 +185,10 @@ int main(int argc, char **argv) {
 	{ 	
 		captureVideo.release();
 		image.release();
-		//cvDestroyWindow("stream_server");
-	}
-	if(captureDepth.isOpened())
-	{ 	
-		captureDepth.release();
-		depth.release();
+		if(DEBUG == 1)
+		{		
+			cvDestroyWindow("stream_server");
+		}
 	}
 
     // Graceful exit via quit, which shuts down the streaming server
@@ -325,16 +296,12 @@ void* streamServer(void* arg)
 			ImageStringStream.seekg(0, ios::end);
             ImageStreamSize = ImageStringStream.tellg();
             sprintf(ImageFileLengthString, "%i", ImageStreamSize);
-			//printf("ImageFileLengthString: %s\n", ImageFileLengthString);            
-			//printf("Position in input stream: %d\n--\n", ImageStreamSize);
-
+			
 			// Set up depth data for socket connections
 			DepthStringStream.seekg(0, ios::end);
             DepthStreamSize = DepthStringStream.tellg();
             sprintf(DepthFileLengthString, "%i", DepthStreamSize);
-			//printf("DepthFileLengthString: %s\n", DepthFileLengthString);            
-			//printf("Position in input stream: %d\n--\n", DepthStreamSize);
-            
+			
 			if (DEBUG == 1)
 			{
                 cout << "Sending image data (size " << ImageStreamSize << " bytes), depth data (" << DepthStreamSize << " bytes)" << endl;	
@@ -342,10 +309,10 @@ void* streamServer(void* arg)
             
 			bytes = send(clientsock, ImageFileLengthString, 10, 0);
             bytes = send(clientsock, ImageStringStream.str().c_str(), ImageStreamSize, 0);
-			cout << "Sent " << bytes << " bytes of image data." << endl;
+			//cout << "Sent " << bytes << " bytes of image data." << endl;
 			bytes = send(clientsock, DepthFileLengthString, 10, 0);
             bytes = send(clientsock, DepthStringStream.str().c_str(), DepthStreamSize, 0);
-			cout << "Sent " << bytes << " bytes of depth data." << endl;
+			//cout << "Sent " << bytes << " bytes of depth data." << endl;
             is_data_ready = 0;
         }
 		//printf("Unlocking thread and clearing string stream...\n");
@@ -383,43 +350,27 @@ void* streamServer(void* arg)
 
 void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth) 
 {
-	int SizeDataOriginal = 640*480*2;
+	// Setup the zLib objects needed for data compression
+	int SizeDataOriginal = FRAME_WIDTH * FRAME_HEIGHT * sizeof(unsigned short);
 	ulong SizeDataCompressed  = (SizeDataOriginal * 1.1) + 12;
 	unsigned char* DataCompressed = (unsigned char*)malloc(SizeDataCompressed);
 
-	int z_result = compress(
-        
-        DataCompressed,         // destination buffer,
-                                // must be at least
-                                // (1.01X + 12) bytes as large
-                                // as source.. we made it 1.1X + 12bytes
+	// Compress the data
+	int z_result = compress(DataCompressed, &SizeDataCompressed, _depth.datastart, SizeDataOriginal) ;
 
-        &SizeDataCompressed,    // pointer to var containing
-                                // the current size of the
-                                // destination buffer.
-                                // WHEN this function completes,
-                                // this var will be updated to
-                                // contain the NEW size of the
-                                // compressed data in bytes.
-
-        _depth.datastart,           // source data for compression
-        
-        SizeDataOriginal ) ;
-
+	// Determine if compression was successful
 	switch( z_result )
     {
 		case Z_OK:
-			printf("***** SUCCESS! ***** Compressed size is %d bytes\n", SizeDataCompressed );
+			//printf("***** SUCCESS! ***** Compressed size is %d bytes\n", SizeDataCompressed );
 		    break;
-
 		case Z_MEM_ERROR:
-		    printf("out of memory\n");
-		    exit(1);    // quit.
+		    printf("Compression error: out of memory\n");
+		    exit(1);
 		    break;
-
 		case Z_BUF_ERROR:
-		    printf("output buffer wasn't large enough!\n");
-		    exit(1);    // quit.
+		    printf("Compression error: output buffer wasn't large enough\n");
+		    exit(1);
 		    break;
     }
 
@@ -453,15 +404,16 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
  * Outputs:
  * - reference to cv matrix 8-bit 3 channels
  */
-cv::Mat visualizeDepth(cv::Mat DepthFrame) {
-    cv::Mat depthRGB(480, 640, CV_8UC3);
+cv::Mat visualizeDepth(cv::Mat DepthFrame) 
+{
+    cv::Mat depthRGB(FRAME_HEIGHT, FRAME_WIDTH, CV_8UC3);
     int lb, ub;
 	unsigned short MajorDepthValue, MinorDepthValue;
 	int DepthValue;
     
 	//cout << "DepthFrame.size()=" << DepthFrame.size() << endl;
   
-    for (int i = 0; i < 480*640; i++) {
+    for (int i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; i++) {
 		
 		MajorDepthValue = DepthFrame.datastart[(i*2)+1];		
 		MinorDepthValue = DepthFrame.datastart[i*2];
@@ -536,11 +488,6 @@ void quit(char* msg, int retval)
 	{ 	
 		captureVideo.release();
 		image.release();
-	}
-	if(captureDepth.isOpened())
-	{
-		captureDepth.release();
-		depth.release();
 	}
 
     pthread_mutex_destroy(&mutex);
