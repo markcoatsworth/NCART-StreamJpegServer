@@ -24,7 +24,8 @@
 // Jpeg Lib includes
 #include <jpeglib.h>
 
-// ZLib include
+// Compression includes
+#include <bzlib.h>
 #include <zlib.h>
 
 // Local includes
@@ -54,10 +55,12 @@ cv::VideoCapture captureVideo;
 cv::Mat depth;
 cv::Mat image;
 
+std::ofstream CompressionDataFile;
 std::stringstream DepthStringStream;
 std::stringstream ImageStringStream;
 
-char* cstr2;
+char CompressionDataFileName[100];
+char DepthCompressionLibrary[10] = "bzip2"; // can be either "zlib", "bzip2", or left empty for no compression
 char DepthFileLengthString[10];
 char ImageFileLengthString[10];
 
@@ -103,7 +106,14 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
-	    // Run the streaming server as a separate thread
+	// Determine the name of the output file for compression data
+	struct tm * CurrentDateTime;
+	time_t RawTime;
+	time(&RawTime);
+	CurrentDateTime = localtime(&RawTime);
+	strftime(CompressionDataFileName, 40, "compression_data_%Y-%m-%d_%H%M%S.csv", CurrentDateTime);
+
+	// Run the streaming server as a separate thread
     if (pthread_create(&thread_s, NULL, streamServer, NULL)) 
 	{
 		quit("pthread_create failed.", 1);
@@ -350,51 +360,110 @@ void* streamServer(void* arg)
 
 void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth) 
 {
-	// Setup the zLib objects needed for data compression
-	int SizeDataOriginal = FRAME_WIDTH * FRAME_HEIGHT * sizeof(unsigned short);
-	ulong SizeDataCompressed  = (SizeDataOriginal * 1.1) + 12;
-	unsigned char* DataCompressed = (unsigned char*)malloc(SizeDataCompressed);
+	clock_t ClockStart, ClockEnd;
+	float CompressionTime;
 
-	// Compress the data
-	int z_result = compress(DataCompressed, &SizeDataCompressed, _depth.datastart, SizeDataOriginal) ;
+	CompressionDataFile.open(CompressionDataFileName, std::ofstream::out | std::ofstream::app);
 
-	// Determine if compression was successful
-	switch( z_result )
-    {
-		case Z_OK:
-			//printf("***** SUCCESS! ***** Compressed size is %d bytes\n", SizeDataCompressed );
-		    break;
-		case Z_MEM_ERROR:
-		    printf("Compression error: out of memory\n");
-		    exit(1);
-		    break;
-		case Z_BUF_ERROR:
-		    printf("Compression error: output buffer wasn't large enough\n");
-		    exit(1);
-		    break;
-    }
-
-	// Write the compressed data to the output stream
-	for(int i = 0; i < SizeDataCompressed; i++)
+	// Code for zLib depth compression
+	if(strcmp(DepthCompressionLibrary, "zlib") == 0)
 	{
-		_outstream << (char)DataCompressed[i];
-	}
+		// Setup the zLib objects needed for data compression
+		int SizeDataOriginal = FRAME_WIDTH * FRAME_HEIGHT * sizeof(unsigned short);
+		ulong SizeDataCompressed  = (SizeDataOriginal * 1.1) + 12;
+		unsigned char* DataCompressed = (unsigned char*)malloc(SizeDataCompressed);
 
-	/*
-	// Visit each node in the depth matrix and write values to the stringstream	
-	for (int row = 0; row < _depth.rows; row ++)
-	{
-		for (int col = 0; col < _depth.cols; col ++)
+		// Compress the data
+		ClockStart = clock();
+		int CompressionResult = compress(DataCompressed, &SizeDataCompressed, _depth.datastart, SizeDataOriginal) ;
+
+		// Determine if compression was successful
+		switch(CompressionResult)
 		{
-			unsigned short DepthValue = _depth.at<short>(row, col);
-			unsigned short MajorDepthValue = DepthValue / 256;
-			unsigned short MinorDepthValue = DepthValue % 256;
-			//cout << "[" << row << "," << col << "]=" << _depth.at<short>(row, col) << ", Encoded=" << MajorDepthValue << MinorDepthValue << endl;
-			_outstream << (char)MajorDepthValue << (char)MinorDepthValue;
-			
+			case Z_OK:
+				ClockEnd = clock();
+				CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
+				CompressionDataFile << "zlib," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
+				CompressionDataFile.close();				
+				break;
+			case Z_MEM_ERROR:
+				printf("Compression error: out of memory\n");
+				exit(1);
+				break;
+			case Z_BUF_ERROR:
+				printf("Compression error: output buffer wasn't large enough\n");
+				exit(1);
+				break;
+		}
+
+		// Write the compressed data to the output stream
+		for(int i = 0; i < SizeDataCompressed; i++)
+		{
+			_outstream << (char)DataCompressed[i];
 		}
 	}
-	*/
+	// Code for bzip2 compression
+	else if(strcmp(DepthCompressionLibrary, "bzip2") == 0)
+	{
+		// Setup the bzip2 objects needed for data compression
+		int SizeDataOriginal = FRAME_WIDTH * FRAME_HEIGHT * sizeof(unsigned short);
+		unsigned int SizeDataCompressed = (SizeDataOriginal * 1.01) + 600;
+		char* DataCompressed = (char*)malloc(SizeDataCompressed);
+		int BlockSize100k = 4; // must be between 1 and 9
+		int Verbosity = 0; // between 0 and 4; 0 is silent, 4 gives most information
+		int WorkFactor = 30; // between 0 and 250
+
+		// Compress the data
+		ClockStart = clock();
+		int CompressionResult = BZ2_bzBuffToBuffCompress(DataCompressed, &SizeDataCompressed, (char*)_depth.datastart, SizeDataOriginal, BlockSize100k, Verbosity, WorkFactor);
+ 
+		// Determine if compression was successful
+		switch(CompressionResult)
+		{
+			case BZ_OK:
+				ClockEnd = clock();
+				CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
+				CompressionDataFile << "bzip2," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
+				CompressionDataFile.close();				
+				break;
+			case BZ_MEM_ERROR:
+				printf("Compression error: out of memory\n");
+				exit(1);
+				break;
+			case BZ_CONFIG_ERROR:
+				printf("Compression error: bzip2 library has been misconfigured\n");
+				exit(1);
+				break;
+			case BZ_PARAM_ERROR:
+				printf("Compression error: bzip2 parameter error\n");
+				exit(1);
+				break;
+		}
+
+		// Write the compressed data to the output stream
+		for(int i = 0; i < SizeDataCompressed; i++)
+		{
+			_outstream << (char)DataCompressed[i];
+		}
+
+	}
+	// Code for no depth compression
+	else
+	{
+		// Visit each node in the depth matrix and write values to the stringstream	
+		for (int row = 0; row < _depth.rows; row ++)
+		{
+			for (int col = 0; col < _depth.cols; col ++)
+			{
+				unsigned short DepthValue = _depth.at<short>(row, col);
+				unsigned short MajorDepthValue = DepthValue / 256;
+				unsigned short MinorDepthValue = DepthValue % 256;
+				//cout << "[" << row << "," << col << "]=" << _depth.at<short>(row, col) << ", Encoded=" << MajorDepthValue << MinorDepthValue << endl;
+				_outstream << (char)MajorDepthValue << (char)MinorDepthValue;
+			
+			}
+		}
+	}
 }
 
 /* 
