@@ -27,6 +27,7 @@
 // Compression includes
 #include <bzlib.h>
 #include <zlib.h>
+#include <snappy.h>
 
 // Local includes
 #include "process_jpeg.h"
@@ -60,7 +61,7 @@ std::stringstream DepthStringStream;
 std::stringstream ImageStringStream;
 
 char CompressionDataFileName[100];
-char DepthCompressionLibrary[10] = "bzip2"; // can be either "zlib", "bzip2", or left empty for no compression
+char DepthCompressionLibrary[10] = "snappy"; // can be either "zlib", "bzip2", "snappy" or left empty for no compression
 char DepthFileLengthString[10];
 char ImageFileLengthString[10];
 
@@ -365,11 +366,13 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 
 	CompressionDataFile.open(CompressionDataFileName, std::ofstream::out | std::ofstream::app);
 
+	// Common variables used by all compression schemes
+	int SizeDataOriginal = FRAME_WIDTH * FRAME_HEIGHT * sizeof(unsigned short);
+
 	// Code for zLib depth compression
 	if(strcmp(DepthCompressionLibrary, "zlib") == 0)
 	{
 		// Setup the zLib objects needed for data compression
-		int SizeDataOriginal = FRAME_WIDTH * FRAME_HEIGHT * sizeof(unsigned short);
 		ulong SizeDataCompressed  = (SizeDataOriginal * 1.1) + 12;
 		unsigned char* DataCompressed = (unsigned char*)malloc(SizeDataCompressed);
 
@@ -406,12 +409,11 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 	else if(strcmp(DepthCompressionLibrary, "bzip2") == 0)
 	{
 		// Setup the bzip2 objects needed for data compression
-		int SizeDataOriginal = FRAME_WIDTH * FRAME_HEIGHT * sizeof(unsigned short);
 		unsigned int SizeDataCompressed = (SizeDataOriginal * 1.01) + 600;
 		char* DataCompressed = (char*)malloc(SizeDataCompressed);
-		int BlockSize100k = 4; // must be between 1 and 9
+		int BlockSize100k = 1; // must be between 1 and 9
 		int Verbosity = 0; // between 0 and 4; 0 is silent, 4 gives most information
-		int WorkFactor = 30; // between 0 and 250
+		int WorkFactor = 100; // between 0 and 250
 
 		// Compress the data
 		ClockStart = clock();
@@ -446,6 +448,34 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 			_outstream << (char)DataCompressed[i];
 		}
 
+	}
+	// Code for snappy compression
+	else if(strcmp(DepthCompressionLibrary, "snappy") == 0)
+	{
+		//cout << "Compressing with snappy..., SizeDataOriginal=" << SizeDataOriginal << endl;
+		std::string DataUncompressed((char*)_depth.datastart, SizeDataOriginal);
+		//cout << "DataUncompressed.length()=" << DataUncompressed.length() << endl;
+		//printf("_depth.datastart=%s\n\n", _depth.datastart);		
+		//cout << "DataUncompressed=" << DataUncompressed.data() << endl;		
+		std::string DataCompressed;
+		DataCompressed.resize(SizeDataOriginal + 1000);
+		
+		// Compress the data
+		ClockStart = clock();
+		size_t SizeDataCompressed = snappy::Compress(DataUncompressed.data(), SizeDataOriginal, &DataCompressed);
+		ClockEnd = clock();
+
+		// Save results to file
+		CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
+		// cout << "snappy," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
+		CompressionDataFile << "snappy," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
+		CompressionDataFile.close();
+
+		// Write the compressed data to the output stream
+		for(int i = 0; i < SizeDataCompressed; i++)
+		{
+			_outstream << (char)DataCompressed[i];
+		}
 	}
 	// Code for no depth compression
 	else
