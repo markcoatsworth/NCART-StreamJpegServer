@@ -36,7 +36,8 @@
 
 // Global constants
 
-#define DEBUG 0         	// 1  to print debug msgs, 0 to print nothing
+#define DEBUG 1         	// 1 to print debug msgs, 0 to print nothing
+#define FILE_OUTPUT 0		// 1 to output data to file, 0 for no output
 #define FRAME_WIDTH 640
 #define FRAME_HEIGHT 480
 #define PORT 8888
@@ -61,7 +62,7 @@ std::stringstream DepthStringStream;
 std::stringstream ImageStringStream;
 
 char CompressionDataFileName[100];
-char DepthCompressionLibrary[10] = "snappy"; // can be either "zlib", "bzip2", "snappy" or left empty for no compression
+char DepthCompressionLibrary[10] = "none"; // can be either "zlib", "bzip2", "snappy" or "none"
 char DepthFileLengthString[10];
 char ImageFileLengthString[10];
 
@@ -128,7 +129,7 @@ int main(int argc, char **argv) {
 	// Debug: show stream server video window
 	if(DEBUG == 1)
 	{
-		cv::namedWindow("stream_server");
+		//cv::namedWindow("stream_server");
 	}
 
 	// Main capture + display video loop
@@ -154,8 +155,8 @@ int main(int argc, char **argv) {
 		// Debug: convert the depth frame to RGB and display in the server window		
 		if(DEBUG == 1)
 		{
-			cv::Mat DepthRGBFrame = visualizeDepth(depth);		
-			imshow("stream_server", DepthRGBFrame);
+			//cv::Mat DepthRGBFrame = visualizeDepth(depth);		
+			//imshow("stream_server", DepthRGBFrame);
 		}
 
 		
@@ -364,7 +365,11 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 	clock_t ClockStart, ClockEnd;
 	float CompressionTime;
 
-	CompressionDataFile.open(CompressionDataFileName, std::ofstream::out | std::ofstream::app);
+	/*** test for memory leaks, there is no garbage collection in here!!! ***/
+	if(FILE_OUTPUT == 1)
+	{
+		CompressionDataFile.open(CompressionDataFileName, std::ofstream::out | std::ofstream::app);
+	}
 
 	// Common variables used by all compression schemes
 	int SizeDataOriginal = FRAME_WIDTH * FRAME_HEIGHT * sizeof(unsigned short);
@@ -385,9 +390,12 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 		{
 			case Z_OK:
 				ClockEnd = clock();
-				CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
-				CompressionDataFile << "zlib," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
-				CompressionDataFile.close();				
+				if(FILE_OUTPUT == 1)
+				{
+					CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
+					CompressionDataFile << "zlib," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
+					CompressionDataFile.close();				
+				}				
 				break;
 			case Z_MEM_ERROR:
 				printf("Compression error: out of memory\n");
@@ -424,9 +432,12 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 		{
 			case BZ_OK:
 				ClockEnd = clock();
-				CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
-				CompressionDataFile << "bzip2," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
-				CompressionDataFile.close();				
+				if(FILE_OUTPUT == 1)
+				{
+					CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
+					CompressionDataFile << "bzip2," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
+					CompressionDataFile.close();				
+				}				
 				break;
 			case BZ_MEM_ERROR:
 				printf("Compression error: out of memory\n");
@@ -466,10 +477,12 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 		ClockEnd = clock();
 
 		// Save results to file
-		CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
-		// cout << "snappy," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
-		CompressionDataFile << "snappy," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
-		CompressionDataFile.close();
+		if(FILE_OUTPUT == 1)
+		{
+			CompressionTime = ((float)ClockEnd - (float)ClockStart) / CLOCKS_PER_SEC;
+			CompressionDataFile << "snappy," << SizeDataOriginal << "," << SizeDataCompressed << "," << CompressionTime << endl;
+			CompressionDataFile.close();
+		}
 
 		// Write the compressed data to the output stream
 		for(int i = 0; i < SizeDataCompressed; i++)
@@ -478,7 +491,7 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 		}
 	}
 	// Code for no depth compression
-	else
+	else if(strcmp(DepthCompressionLibrary, "none") == 0)
 	{
 		// Visit each node in the depth matrix and write values to the stringstream	
 		for (int row = 0; row < _depth.rows; row ++)
@@ -489,7 +502,7 @@ void WriteDepthData(std::stringstream& _outstream, cv::Mat _depth)
 				unsigned short MajorDepthValue = DepthValue / 256;
 				unsigned short MinorDepthValue = DepthValue % 256;
 				//cout << "[" << row << "," << col << "]=" << _depth.at<short>(row, col) << ", Encoded=" << MajorDepthValue << MinorDepthValue << endl;
-				_outstream << (char)MajorDepthValue << (char)MinorDepthValue;
+				_outstream << (char)MinorDepthValue << (char)MajorDepthValue;
 			
 			}
 		}
